@@ -10,90 +10,101 @@ import qualified Data.Map as Map
 
 newtype UpperName = UN String deriving (Eq,Ord)
 newtype LowerName = LN String deriving (Eq,Ord)
+newtype AuthorName = AN String deriving (Eq,Ord)
 
-data FullTypeName = FTN Qualifier UpperName deriving (Eq,Ord)
-
-type Qualifier = [UpperName]
+type Qualifier = [LowerName]
 
 type PackageName = LowerName
+type FullPackageName = (AuthorName, LowerName)
+type QualifiedTypeName = (Qualifier, UpperName)
+type QualifiedDefName = (Qualifier, LowerName)
 
 ----------------------------------------------------------------------------
--- Packages
+-- Programs
 ----------------------------------------------------------------------------
 
--- Based pretty heavily on Haskell's Backpack (POPL 2014)
+type Program = Map.Map (AuthorName, PackageName) Package
 
-type Program = [Package]
+----------------------------------------------------------------------------
+-- Structure
+----------------------------------------------------------------------------
 
+-- Packages aren't nested
 data Package
-    = Package PackageName Thinning [Binding]
+    = Package [Using] [Provides] [PackageDefinition]
       deriving Eq
 
-type Thinning = [Qualifier]
-
-data Binding
-    = Bind Qualifier Bindable
-    | Include PackageName Thinning Renaming
+data Using
+    = Using FullPackageName SemanticVersion
+    | UsingQual FullPackageName SemanticVersion PackageName
       deriving Eq
 
-type Renaming = [(Qualifier,Qualifier)]
+-- format: MAJOR.MINOR.PATCH
+-- MAJOR: removes or changes existing API (breaks backward compatibility)
+-- MINOR: adds to existing API (no breaking of backward compatibility, but could introduce name conflicts)
+-- PATCH: no changes to API (no breaking backward compatibility, no possible introduction of name conflicts)
+type SemanticVersion = (VersionNum, VersionNum, VersionNum)
 
-data Bindable
-    = BMod Module
-    | BSig Signature
-    | BEq Qualifier
+data VersionNum
+    = SpecVersion Int
+    | AnyVersion
       deriving Eq
 
-----------------------------------------------------------------------------
--- Modules & Signatures
-----------------------------------------------------------------------------
-
-data Module
-    = Module [Import] [Export] [Definition]
+data Provides
+    = ProvideType UpperName [UpperName]
+    | ProvideTypeAll UpperName
+    | ProvideVal LowerName
       deriving Eq
+
+data PackageDefinition
+    = OverloadDef LowerName Polytype
+    | InstanceDef LowerName [Polytype] Expr
+    | SignatureDef UpperName Signature
+    | RecipeDef UpperName [Import] [Export] [WordDefinition]
+    | CompoundDef UpperName [Import] [Export] [Linkage]
+    | WordDef WordDefinition
+      deriving Eq
+
+data Linkage
+    = Link UpperName [LinkImport] [LinkExport]
+      deriving Eq
+
+type LinkImport = LinkExternal
+type LinkExport = LinkExternal
+
+data LinkExternal
+    = LinkVal LowerName LowerName
+    | LinkType UpperName UpperName
+      deriving Eq
+
+type Import = Signature
+type Export = Signature
 
 data Signature
-    = Signature [Import] [Declaration]
+    = NamedSig UpperName
+    | SigSet [External]
+    | SigSum Signature Signature
+    | SigDiff Signature Signature
       deriving Eq
 
-data Import
-    = Import Qualifier [ImportSpec]
-    | ImportAs Qualifier Qualifier [ImportSpec]
+data WordDefinition
+    = TypeDef UpperName [TypeVar] [Constructor]
+    | TypeAlias UpperName [TypeVar] Monotype
+    | FunDef LowerName (Maybe Polytype) Expr
+    | KegDef LowerName QualifiedTypeName [Supplied]
+    | LawDef LowerName [LowerName] Expr
       deriving Eq
 
-data ImportSpec
-    = ImpType UpperName
-    | ImpConstructor UpperName [UpperName]
-    | ImpClass UpperName [LowerName]
-    | ImpTypeAll UpperName
-    | ImpFunction LowerName
+type Constructor = (UpperName,[Monotype])
+
+data External
+    = ExternalType UpperName [TypeVar]
+    | ExternalVal LowerName
       deriving Eq
 
-data Export
-    = ExpType UpperName
-    | ExpConstructor UpperName [UpperName]
-    | ExpClass UpperName [LowerName]
-    | ExpTypeAll UpperName
-    | ExpFunction LowerName
-      deriving Eq
-
-----------------------------------------------------------------------------
--- Definitions & Declarations
-----------------------------------------------------------------------------
-
-data Declaration
-    = ConstructorDecl UpperName [TypeVar] [(UpperName,[Type])]
-    | AliasDecl UpperName [TypeVar] Type
-    | ClassDecl UpperName [TypeVar] ConstraintSet [(LowerName,Type)]
-    | FunctionDecl LowerName TypeExpr
-      deriving Eq
-
-data Definition
-    = ConstructorDef UpperName [LowerName] [(UpperName,[Type])]
-    | AliasDef UpperName [LowerName] Type
-    | ClassDef UpperName [TypeVar] ConstraintSet [(LowerName,Type)]
-    | InstanceDef UpperName [TypeExpr] ConstraintSet [(LowerName,Expr)]
-    | FunctionDecl LowerName (Maybe Type) Expr
+data Supplied
+    = SupplyType UpperName QualifiedTypeName
+    | SupplyVal LowerName QualifiedDefName
       deriving Eq
 
 ----------------------------------------------------------------------------
@@ -103,74 +114,44 @@ data Definition
 data Kind
     = KStar
     | KSeq
-    | KEff
     | KEffRow
-    | KRec
-    | KLabel
-    | KRecRow
+    | KFieldRow
     | KFun Kind Kind
       deriving Eq
 
 data TypeVar
-    = TV LowerName Kind
+    = IVar LowerName
+    | EVar LowerName Kind
       deriving Eq
 
-data TypeExpr
+data Monotype
     = TVar TypeVar
-    | TLabel LowerName
-    | TApp TypeExpr TypeExpr
-    | TConstructor FullTypeName
+    | TApp Monotype Monotype
+    | TConstructor Qualifier UpperName
+    | TSeq [Monotype]
+    | TEffectRow [Effect] (Maybe TypeVar)
+    | TFieldRow [Field] (Maybe TypeVar)
+    | TDotted Monotype
+    | TPrim TypePrimitive
       deriving Eq
 
--- Invariant: must be of kind *
-newtype Type
-    = Type TypeExpr
+data Polytype
+    = Poly [TypeVar] Monotype
       deriving Eq
 
-data Constraint
-    = Constraint FullTypeName [TypeExpr]
+data Effect
+    = EPartial
+    | EDiverge
+    | ENondet
+    | EIO
+      deriving Eq
 
-data Constrained
-    = Constrained [Constraint] Type
+type Field = (LowerName,Monotype)
 
-data Scheme
-    = Scheme [TypeVar] Constrained
-
--- primitive type constructors
-primConstructors = Map.fromList [
-    -- effects
-    (prim "Par", KEff), -- partial function
-    (prim "Div", KEff), -- possibly diverges
-    (prim "Ndet", KEff), -- nondeterministic
-    (prim "IO", KEff), -- IO
-    (prim "EmptyEff", KEffRow),
-    (prim "AddEff", KFun KEff KEffRow)
-
-    -- fields
-    (prim "EmptyField", KRecRow),
-    (prim "AddField", KFun KLabel (KFun KStar KRecRow)),
-
-    -- sequences
-    (prim "EmptySeq", KSeq),
-    (prim "AddSeq", KFun KStar KSeq),
-
-    -- basics
-    (prim "I32", KStar),
-    (prim "I64", KStar),
-    (prim "U32", KStar),
-    (prim "U64", KStar),
-    (prim "F32", KStar),
-    (prim "F64", KStar),
-    (prim "Bool", KStar),
-
-    -- builders
-    (prim "->", KFun KEffRow (KFun KSeq (KFun KSeq KStar))),
-    (prim "List", KFun KStar KStar),
-    (prim "Tuple", KFun KSeq KStar),
-    (prim "Record", KFun KRecRow KStar),
-    (prim "Variant", KFun KRecRow KStar)
-    ]
-    where prim n = ([],n)
+data TypePrimitive
+    = TI32 | TI64 | TU32 | TU64 | TF32 | TF64 | TBool
+    | TFun | TList | TTuple | TRecord | TVariant
+      deriving Eq
 
 ----------------------------------------------------------------------------
 -- Expressions
@@ -183,14 +164,14 @@ data Word
     = WBool Bool | WNat Integer | WReal Double
     | WRune Char | WString String
     -- lists
-    | WListNil | WListCons | WListHead | WListTail
+    | WListNil | WListCons
     -- tuples
-    | WTupleNil | WTupleCons | WTupleHead | WTupleTail
+    | WTupleNil | WTupleCons
+    | WTupleLift | WTupleFoldLeft | WTupleFoldRight
     -- records
-    | WRecordNil | WExtension LowerName
-    | WRestriction LowerName | WSelection LowerName
+    | WRecordNil | WExtension LowerName | WSelection LowerName
     -- variants
-    | WVariant LowerName | WEmbed LowerName | WDecompose LowerName
+    | WVariant LowerName | WDecompose LowerName
     -- functions
     | WCall | WBlock Expr
     -- variables
@@ -206,13 +187,27 @@ data Option
     = TOption [Pattern] Expr
       deriving Eq
 
+type FieldPattern = (LowerName, Pattern)
+
 data Pattern
     = PBool Bool | PNat Integer | PReal Double
     | PRune Char | PString String
-    | PList [Pattern] | PTuple [Pattern]
-    | PRecord [(LowerName, Pattern)] (Maybe LowerName)
+    | PList [Pattern] | PTuple [Pattern] (Maybe LowerName)
+    | PRecord [FieldPattern] (Maybe LowerName)
     | PVariant LowerName Pattern
     | PIndWildcard | PSeqWildcard
     | PNamed LowerName Pattern
     | PConstructor Qualifier UpperName [Pattern]
       deriving Eq
+
+-- list of eventual primitives
+{-
+
+error : a... String -> b...
+add : a... Num Num -> a... Num
+sub
+mul
+divmod
+div
+
+-}
